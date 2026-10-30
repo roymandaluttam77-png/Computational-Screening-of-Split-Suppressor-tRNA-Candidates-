@@ -1,0 +1,397 @@
+===============================================================================
+SPLIT tRNA PREDICTION - COMPLETE PSEUDO CODE
+Phase I: genome scan and structural filters
+Phase II: validation of predicted candidates, including the GC composition check
+-------------------------------------------------------------------------------
+Markers:  // NEW       step or line added for the GC criteria
+          // MODIFIED  step changed from the previous version
+All GC values use canonical Sprinzl slots 1..72; GAP slots are excluded from
+both numerator and denominator. Positions 73 and the CCA end are never counted.
+===============================================================================
+
+
+===============================================================================
+PHASE I - GENOME SCAN AND STRUCTURAL FILTERS
+===============================================================================
+ INPUT     genome G; length bounds Lmin, Lmax; number of randomisations NR
+ OUTPUT    two candidate sets: CAND (from real genome), DECOY (from shuffled)
+
+ STEP 1: PREPROCESS GENOME SEQUENCE AND BUILD SHUFFLED GENOMES
+   read G; strip FASTA header, whitespace, digits, non-ACGT symbols
+   uppercase; convert T to U for scoring
+   GENOMES <- { G }                                  // the real genome
+   for run <- 1 to NR:
+       GENOMES <- GENOMES + { randomise(G) }         // preserve length and base
+                                                     // composition; dinucleotide-
+                                                     // preserving shuffle preferred
+   // every genome below passes through the IDENTICAL steps 2-11
+
+ STEP 2: ANALYSE BOTH STRANDS
+   for each genome g in GENOMES:
+     for STRAND in {FORWARD, REVERSE}:
+         seq <- g if FORWARD else reverse_complement(g)
+
+ STEP 3: SEARCH POSSIBLE 5' HALVES
+         for each position n in seq:
+             segment <- seq[n .. n+40]
+             if check_first(segment):
+                 record (first_half_start, first_half_length)
+
+ STEP 4: SEARCH POSSIBLE 3' HALVES
+         for each position n1 in seq:
+             segment <- required 3' region from n1
+             if check_2nd(segment):
+                 record second_half_position
+
+ STEP 5: ASSEMBLE CANDIDATE SPLIT tRNA
+         for each 5' half F, each 3' half S, each L in [Lmin, Lmax]:
+             Candidate <- first_part(F) + second_part(S)
+             if length(Candidate) != L: continue
+
+ STEP 6: INITIALISE STRUCTURE
+             x[1..72] <- ALIGN_SPRINZL(Candidate)     // map onto the 72 standard
+                                                      // positions; unfilled = GAP
+             if alignment fails: reject
+             initialise cloverleaf matrix on x
+             acceptor_arm   <- (1,72)(2,71)(3,70)(4,69)(5,68)(6,67)(7,66)
+             D_arm          <- (10,25)(11,24)(12,23)(13,22)
+             anticodon_arm  <- (27,43)(28,42)(29,41)(30,40)(31,39)
+             T_arm          <- (49,65)(50,64)(51,63)(52,62)(53,61)
+             STEM_SLOTS     <- all 42 slots occurring in the four arms above
+             tertiary_pairs <- 8-14, 15-48, 18-55, 19-56, 26-44, 32-38, 54-58
+             // the mapping x is stored with the candidate: every positional
+             // claim downstream depends on it and must be auditable
+
+ STEP 7: TEST TOTAL STEM
+             a pair is paired if A-U, U-A, G-C, C-G, G-U or U-G
+             a pair with a GAP on either side is NOT SCORED (not a mismatch)
+             for arm in {acceptor, D, anticodon, T}:
+                 if mismatches(arm) > arm_threshold: REJECT candidate
+             paired <- pairs paired over all 21 canonical pairs
+             scored <- pairs with both sides present
+             P_pair <- paired / scored        // recorded, never used to decide
+
+ STEP 8: TEST CONSERVED POSITIONS
+             INVARIANT <- {8:U, 14:A, 21:A, 33:U, 48:C, 53:G,
+                           54:U, 55:U, 56:C, 57:G, 58:A, 61:C}
+             TLOOP     <- {54:U, 55:U, 56:C, 57:G, 58:A}
+             I      <- matches over INVARIANT / INVARIANT positions present
+             Theta  <- matches over TLOOP / TLOOP positions present
+             Levitt <- (x[15] = G and x[48] = C)
+             anticodon <- x[34] x[35] x[36]
+             if anticodon != declared anticodon: flag mismatch
+
+ STEP 9: TEST TERTIARY INTERACTIONS
+             count deviations over tertiary_pairs
+             if stem_deviation + tertiary_deviation > 3: REJECT candidate
+
+ STEP 10: SPLIT-JUNCTION VALIDATION
+             extract genomic context flanking both halves
+             test BHB-like / bulge-helix compatibility with bh_loop()
+             if bh_loop() does not exist: REJECT candidate
+             S_split <- split-context score
+
+ STEP 11: COMPOSITION PROFILE AND TWO SETS OF OUTPUT CANDIDATES   // MODIFIED
+             (GC, GC_stem, GC_nonstem, dGC) <- GC_PROFILE(x)      // see STEP 11a
+             emit (x, anticodon, P_pair, I, Theta, Levitt,
+                   GC, GC_stem, GC_nonstem, dGC, S_split)
+             if g is the real genome: add to CAND
+             else:                    add to DECOY    // the method's own
+                                                      // false positives
+   fp_yield <- size(DECOY) / NR                       // decoys per randomised genome
+   pass CAND and DECOY to PHASE II
+
+ STEP 11a: FUNCTION GC_PROFILE(x)                                  // NEW
+   // one definition used everywhere: references, candidates and decoys
+   PRESENT  <- { i in 1..72 : x[i] != GAP }
+   STEMS    <- { i in PRESENT : i in STEM_SLOTS }     // at most 42 slots
+   NONSTEM  <- PRESENT \ STEMS                        // loops + 8, 9, 26
+   GC         <- count{ i in PRESENT : x[i] in {G,C} } / size(PRESENT)
+   GC_stem_n  <- count{ i in STEMS   : x[i] in {G,C} }     // integer count, of 42
+   GC_stem    <- GC_stem_n / size(STEMS)
+   GC_nonstem <- count{ i in NONSTEM : x[i] in {G,C} } / size(NONSTEM)
+   dGC        <- GC_stem - GC_nonstem                 // in percentage points
+   return (GC, GC_stem_n, GC_stem, GC_nonstem, dGC)
+   // RATIONALE: G-C pairs have three hydrogen bonds against two for A-U, so
+   // helices under selection for pairing stability are GC-enriched, while loop
+   // composition answers to other constraints. dGC therefore carries
+   // information that overall GC alone does not.
+   // NOTE: slots are counted, not raw nucleotides. Extra nucleotides inserted
+   // in the D-loop (17a, 20a, ...) or the variable arm (e1, e2, ...) are not
+   // part of the 72 slots and are excluded, so sequences of different lengths
+   // remain comparable.
+
+
+===============================================================================
+PHASE II - VALIDATION OF THE PREDICTED CANDIDATES
+===============================================================================
+
+ STEP 12: INPUTS
+   REF    reference set, 200 known tRNAs on Sprinzl positions 1-72
+   VAL1   known tRNAs of the same species (mature), held out of REF
+   VAL2   further known tRNAs from the reference database, held out of REF
+   DECOY  candidates from the shuffled genomes             (from PHASE I)
+   CAND   predicted candidates to validate                 (from PHASE I)
+   alpha <- 1                                              // Laplace smoothing
+
+ --- Build the reference probability model -----------------------------------
+
+ STEP 13: READ THE REFERENCE SET BY POSITION LABEL
+   for each record r in REF, each position i in 1..72:
+       REF[r][i] <- normalise(cell)    // T->U; 'Absent', '-', blank -> GAP
+   assert the 72 columns are those LABELLED 1..72
+   // taking the first 72 data columns instead shifts every position from 18
+   // onward and silently drops 69-72
+   assert no position has N_i = 0
+
+ STEP 14: FREQUENCY AND EMISSION MATRIX
+   for i <- 1 to 72:
+       n_i(b) <- count of records with REF[r][i] = b, for b in {A,C,G,U}
+       N_i    <- n_i(A)+n_i(C)+n_i(G)+n_i(U)            // GAPs excluded
+       e_i(b) <- ( n_i(b) + alpha ) / ( N_i + 4*alpha )
+       assert sum over b of e_i(b) = 1
+
+ STEP 15: TRANSITION MATRICES AND BACKGROUNDS
+   for i <- 1 to 71:
+       c_i(b1,b2) <- count with REF[r][i]=b1 and REF[r][i+1]=b2
+       Cx_i(b1)   <- sum over b2 of c_i(b1,b2)
+       t_i(b2|b1) <- ( c_i(b1,b2) + alpha ) / ( Cx_i(b1) + 4*alpha )
+       assert sum over b2 of t_i(b2|b1) = 1
+   q(b)       <- sum_i n_i(b) / sum_{i,b} n_i(b)
+   q_d(b2|b1) <- ( sum_i c_i(b1,b2) + alpha )
+                 / ( sum_{i,b2} c_i(b1,b2) + 4*alpha )
+
+ --- Calibrate on known sets, build the two nulls -----------------------------
+
+ STEP 16: SCORE THE REFERENCE SET, LEAVE ONE OUT
+   for each r in REF:
+       rebuild e_i, t_i with r's own counts subtracted
+       S_r <- SCORE(r, leave_one_out = r)       // SCORE defined in STEP 20
+   // without leave-one-out each record contributes to its own score
+
+ STEP 17: SCORE THE KNOWN VALIDATION SETS
+   deduplicate VAL1, VAL2 by accession; assert VAL1 and REF do not overlap
+   POS <- { SCORE(x) : x in VAL1 + VAL2 }
+   mean_real, sd_real, min_real <- mean, sd, min of POS
+   I_5     <- 5th percentile of I over POS
+   Theta_5 <- 5th percentile of Theta over POS
+
+ STEP 17a: GC REFERENCE DISTRIBUTION AND CRITERION THRESHOLDS        // NEW
+   // Thresholds come from the REFERENCE tRNAs ONLY. CAND and DECOY are never
+   // consulted here; otherwise the criteria are tuned to the outcome and the
+   // later comparison is circular.
+   for each r in REF:
+       (GC_r, GCstem_n_r, GCstem_r, GCns_r, dGC_r) <- GC_PROFILE(r)
+   GC_5      <- 5th percentile of GC_r       over REF
+   GCstem_5  <- 5th percentile of GCstem_n_r over REF    // integer count, of 42
+   dGC_5     <- 5th percentile of dGC_r      over REF
+   // report the same profile for VAL1 and VAL2 as independent reference
+   // distributions; do NOT re-derive the thresholds from them
+   for SET in {REF, VAL1, VAL2}:
+       report mean GC, mean GC_stem, mean GC_nonstem, mean dGC, and the
+              fraction with dGC > 0
+   assert the three sets agree; a disagreement means the Sprinzl mapping or
+          the stem slot list differs between sets
+   // SANITY: in natural tRNAs dGC is strongly positive in essentially every
+   // record. If dGC_5 <= 0 the stem slot list in STEP 6 is wrong.
+   // PROVENANCE: if any reference set consists of computational annotations
+   // rather than experimentally confirmed tRNAs, record that with the set and
+   // state it wherever the set is reported.
+
+ STEP 18: NULL A - COMPOSITION-MATCHED PERMUTATION (easy null)
+   NULL_A <- empty
+   for each x in VAL1, repeat K times:
+       slots <- positions where x[i] != GAP
+       permute x's own bases across its own slots       // GAPs stay GAPs
+       NULL_A <- NULL_A + { SCORE(permuted x) }
+   // holds composition exactly; destroys only positional order
+   // NOTE: a permuted record has the SAME GC as its source, but its dGC is
+   // destroyed, because bases are redistributed between stem and non-stem
+   // slots. NULL_A therefore tests positional order, not composition.
+
+ STEP 19: NULL B - RANDOMIZED GENOME (realistic null)
+   NULL_B <- { SCORE(y) : y in DECOY }                  // from PHASE I
+   // same predictor, same filters, same anticodon classes as CAND
+
+ STEP 19b: POWER CHECK ON NULL B
+   p_min <- 1 / ( size(NULL_B) + 1 )
+   if p_min > 0.05:
+       WARN "null too small: no candidate can reach p < 0.05"
+       WARN "at least 99 decoys needed for p < 0.01,
+             i.e. ceil(99 / fp_yield) randomised genomes"
+
+ STEP 19c: NULL C - GC-MATCHED DECOYS (composition-matched null)     // NEW
+   // Separates compositional from positional signal. Without it, a candidate
+   // that is merely GC-rich cannot be told from one that is tRNA-like.
+   NULL_C <- empty
+   for each x in CAND:
+       pool <- decoys, or genomic windows accepted by STEPS 3-10,
+               whose GC lies within +/- 0.02 of GC(x)
+       if size(pool) < 5:
+           WARN "no GC-matched null available for x at GC = GC(x)"
+       NULL_C <- NULL_C + { SCORE(y) : y in pool }
+   // report S, p and AUC against NULL_C alongside NULL_B wherever NULL_B is used
+
+ --- Probabilistic scoring ----------------------------------------------------
+
+ STEP 20: FUNCTION SCORE(x, leave_one_out = none)
+   E <- mean over { i : x[i] != GAP } of ln[ e_i(x[i]) / q(x[i]) ]
+   T <- mean over { i : x[i], x[i+1] != GAP } of
+                       ln[ t_i(x[i+1]|x[i]) / q_d(x[i+1]|x[i]) ]
+   S <- ( E + T ) / 2
+   return (E, T, S, n_E, n_T)
+   // gaps skipped; transitions spanning a gap DROPPED, not bridged
+   // means, not sums: otherwise a longer candidate scores higher for being
+   // longer, and candidates with different gap counts are not comparable
+
+ --- Threshold calibration ----------------------------------------------------
+
+ STEP 21: ROC AGAINST EACH NULL                                    // MODIFIED
+   for NULL in {NULL_A, NULL_B, NULL_C}:
+       AUC <- Mann-Whitney statistic of POS against NULL, tie-corrected
+       null_max <- max of NULL
+       if null_max < min_real:
+           tau <- ( null_max + min_real ) / 2
+           // separation perfect: every cut in the band is equivalent, so the
+           // midpoint is a stated choice, not an optimum - say so
+       else:
+           tau <- threshold maximising Youden J
+   tau_A <- cut from NULL_A (easy)
+   tau_B <- cut from NULL_B (realistic; USE)
+   tau_C <- cut from NULL_C (composition-matched; report)
+
+ STEP 22: EMPIRICAL p FOR A CANDIDATE
+   p_A <- ( count{ s in NULL_A : s >= S(x) } + 1 ) / ( size(NULL_A) + 1 )
+   p_B <- ( count{ s in NULL_B : s >= S(x) } + 1 ) / ( size(NULL_B) + 1 )
+   p_C <- ( count{ s in NULL_C : s >= S(x) } + 1 ) / ( size(NULL_C) + 1 )
+   z   <- ( S(x) - mean_real ) / sd_real
+
+ --- The GC check -------------------------------------------------------------
+
+ STEP 23: GC-ADJUSTED SEPARATION DIAGNOSTIC (on the SET, not per candidate)
+   POOL <- CAND + DECOY;    label <- 1 for CAND, 0 for DECOY
+   AUC_S       <- AUC of S          over POOL
+   AUC_GC      <- AUC of GC         over POOL
+   AUC_GCstem  <- AUC of GC_stem    over POOL        // NEW
+   AUC_dGC     <- AUC of dGC        over POOL        // NEW
+   fit S = a + b*GC over POOL; resid <- S - (a + b*GC)
+   p_resid <- Mann-Whitney p of resid, CAND vs DECOY
+   if AUC_GC >= AUC_S: report "GC alone separates at least as well"
+   if p_resid > 0.05: report "after removing GC the score adds no separation
+                              - composition, not positional structure,
+                              distinguishes the two sets"
+   // This is a DIAGNOSTIC, not a verdict. If it fires, do not discard the
+   // compositional signal as a nuisance: test whether it is complementary
+   // to the positional score (STEP 23a) and, if so, use it (STEP 23b).
+
+ STEP 23a: DOES COMPOSITION ADD TO THE MODEL?                       // NEW
+   // z-standardise each feature across POOL so the terms are commensurate
+   zS     <- zscore(S        over POOL)
+   zGC    <- zscore(GC       over POOL)
+   zstem  <- zscore(GC_stem  over POOL)
+   zd     <- zscore(dGC      over POOL)
+   for COMB in { zS,
+                 zS + zstem,
+                 zS + zGC,
+                 zS + zd,
+                 zS + zstem + zd,
+                 zS + zGC + zstem + zd }:
+       AUC_COMB <- AUC of COMB over POOL;  p_COMB <- Mann-Whitney p
+   report the table of (COMB, AUC_COMB, p_COMB)
+   if max AUC_COMB > AUC_S:
+       report "compositional information is COMPLEMENTARY to the positional
+               model: AUC rises from AUC_S to max AUC_COMB"
+   // The composite is evidence that the features are informative. It is NOT a
+   // tuned classifier: it is evaluated on the same sequences that motivated
+   // it, so report it as such and do not quote it as a validated accuracy.
+
+ STEP 23b: GC ACCEPTANCE CRITERIA                                   // NEW
+   for each candidate x in CAND (and, for the audit, each y in DECOY):
+       (GC, GCstem_n, GC_stem, GC_nonstem, dGC) <- GC_PROFILE(x)
+       C1   <- GC       >= GC_5        // overall composition is tRNA-like
+       C2   <- GCstem_n >= GCstem_5    // the helices are GC-loaded
+       C3   <- dGC      >= dGC_5       // GC is concentrated in the helices
+       n_GC <- C1 + C2 + C3            // 0..3
+   // audit the criteria before using them: they must keep real tRNAs and
+   // reject decoys, and this must be reported whatever the result
+   for SET in {REF, VAL1, VAL2, CAND, DECOY}:
+       report pass rate of C1, of C2, of C3 and of (C1 and C2 and C3)
+   if pass rate of (C1 and C2 and C3) over VAL1 < 0.90:
+       WARN "criteria too strict: they reject real tRNAs"
+   if pass rate of (C1 and C2 and C3) over DECOY > 0.05:
+       WARN "criteria too loose: they admit randomised-genome sequences"
+
+ --- Classification and output ------------------------------------------------
+
+ STEP 24: ACCEPTANCE CRITERIA                                       // MODIFIED
+   for each candidate x in CAND:
+       A <- S(x) > tau_B            B <- p_B < 0.05
+       C <- I >= I_5                D <- Theta >= Theta_5
+       // P_pair is NOT a criterion: the search already discards anything
+       // that cannot fold, so CAND and DECOY both fold well
+       // n_GC comes from STEP 23b
+
+       if A and C and D and n_GC = 3:                   STATUS <- SUPPORTED
+       else if S(x) > max NULL_B and (C or D):          STATUS <- BORDERLINE
+       else:                                            STATUS <- NOT SUPPORTED
+
+       // ORDERING RULE: composition is an ADDITIONAL REQUIREMENT, never a
+       // rescue. A candidate inside the decoy score range stays NOT SUPPORTED
+       // however good its GC profile, because GC without positional structure
+       // is what a GC-rich random sequence also has.
+       if STATUS = NOT SUPPORTED and n_GC >= 2:
+           FLAG "composition tRNA-like but score inside the decoy range
+                 - re-examine under the revised search"
+       if STATUS = SUPPORTED and GC(x) > max GC over DECOY:
+           FLAG "GC above the whole decoy range: confirm against NULL_C"
+       if p_min > 0.05:
+           FLAG "p_B at resolution floor"
+
+ STEP 24a: EFFECT OF THE GC CRITERIA ON THE SEARCH                  // NEW
+   // Measured on the real output of PHASE I, not projected.
+   CAND_GC  <- { x in CAND  : n_GC(x) = 3 }
+   DECOY_GC <- { y in DECOY : n_GC(y) = 3 }
+   fp_yield_old <- size(DECOY)    / NR
+   fp_yield_new <- size(DECOY_GC) / NR
+   report size(CAND), size(CAND_GC), fp_yield_old, fp_yield_new
+   report count of SUPPORTED before and after adding the GC requirement
+   if fp_yield_new < fp_yield_old and
+      SUPPORTED count is unchanged:
+       report "the GC criteria remove false positives at no cost to the
+               supported candidates"
+   // FEEDBACK TO PHASE I: once audited in STEP 23b, C1-C3 may be applied
+   // inside STEP 11 as a screening filter, so that the scan itself emits
+   // fewer false positives. Apply them to the real genome and to all NR
+   // randomised genomes identically, and re-report fp_yield.
+
+ STEP 25: TYPE ASSIGNMENT
+       if candidate is contiguous: type <- canonical tRNA
+       else:                       type <- split tRNA
+       if anticodon in {UCA, CUA, UUA}: type <- split suppressor tRNA
+
+ STEP 26: OUTPUT RECORD                                             // MODIFIED
+       report candidate id, strand, coordinates, both exon coordinates,
+              genomic separation, mature sequence, Sprinzl mapping,
+              anticodon, isotype, type,
+              E, T, S with n_E and n_T, z, p_A, p_B, p_C,
+              tau_A, tau_B, tau_C, max NULL_B, min_real,
+              P_pair, I, Theta, Levitt, S_split,
+              GC, GC_stem_n, GC_stem, GC_nonstem, dGC,
+              C1, C2, C3, n_GC,
+              GC_5, GCstem_5, dGC_5 and the reference set they came from,
+              STATUS and any FLAGs
+
+ STEP 27: REPORT THE CRITERIA AND THEIR PROVENANCE                  // NEW
+       report, for REF, VAL1, VAL2, CAND, DECOY:
+              n, mean GC, mean GC_stem, mean GC_nonstem, mean dGC,
+              fraction with dGC > 0, and the pass rates of C1, C2, C3
+       report the composite table of STEP 23a
+       report fp_yield before and after the GC criteria (STEP 24a)
+       state explicitly:
+              - that GC_5, GCstem_5 and dGC_5 were derived from REF alone,
+                with no reference to CAND or DECOY;
+              - which reference sets are experimentally confirmed and which
+                are computational annotations;
+              - the resolution floor p_min of NULL_B.
+END
+===============================================================================
