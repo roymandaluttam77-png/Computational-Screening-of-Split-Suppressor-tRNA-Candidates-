@@ -1,0 +1,387 @@
+===============================================================================
+SPLIT tRNA PREDICTION - COMPLETE PSEUDOCODE (three-stage workflow, revision R2)
+  Stage I   : structural search          (identical for the real genome and
+                                           for the randomized genomes)
+  Stage II  : probabilistic score S      (model from 199 reference tRNAs)
+  Stage III : GC criteria C1-C3          (thresholds from the same 199 tRNAs)
+  Final     : decision rule              (supported / borderline / not supported)
+-------------------------------------------------------------------------------
+Terminology (used throughout, as in the manuscript and Figure 2):
+  structural-search hit : any sequence that passes Stage I
+  candidate             : a structural-search hit from the MBSW genome
+  decoy                 : a structural-search hit from a randomized genome
+  known tRNAs           : REF (199), VAL1 (62, M. barkeri), VAL2 (96, T-psi-C)
+Markers:  // R2  step added or changed in revision R2
+All GC values use canonical Sprinzl positions 1..72; GAP positions are excluded
+from both numerator and denominator. Position 73 and the CCA end are never
+counted. All sequences are handled in RNA notation (T converted to U).
+===============================================================================
+
+
+===============================================================================
+STAGE I - STRUCTURAL SEARCH
+===============================================================================
+ INPUT     genome G (MBSW, CP009526.1); length bounds Lmin, Lmax;
+           number of randomized genomes NR (= 50); random seed (fixed)
+ OUTPUT    CAND  = structural-search hits from G          (candidates)
+           DECOY = structural-search hits from the NR randomized genomes (decoys)
+
+ STEP 1: PREPROCESS GENOME AND BUILD RANDOMIZED GENOMES
+   read G; strip FASTA header, whitespace, digits, non-ACGT symbols
+   uppercase; convert T to U
+   GENOMES <- { G }                                      // the real genome
+   for run <- 1 to NR:
+       GENOMES <- GENOMES + { shuffle_bases(G, seed) }   // preserves length and
+                                                         // base composition only
+   // every genome below passes through the IDENTICAL steps 2-11
+
+ STEP 2: ANALYSE BOTH STRANDS
+   for each genome g in GENOMES:
+     for STRAND in {FORWARD, REVERSE}:
+         seq <- g if FORWARD else reverse_complement(g)
+
+ STEP 3: SEARCH POSSIBLE 5' HALVES (positions 1-37)
+         for each position n in seq:
+             segment <- seq[n .. n+40]
+             if check_first(segment):
+                 record (first_half_start, first_half_length)
+
+ STEP 4: SEARCH POSSIBLE 3' HALVES (positions 38-72)
+         for each position n1 in seq:
+             segment <- required 3' region from n1
+             if check_2nd(segment):
+                 record second_half_position
+
+ STEP 5: JOIN COMPATIBLE HALVES AT 37/38
+         for each 5' half F, each 3' half S, each L in [Lmin, Lmax]:
+             Candidate <- first_part(F) + second_part(S)
+             if length(Candidate) != L: continue
+             record genomic separation of F and S             // R2
+
+ STEP 6: MAP ONTO THE CANONICAL CLOVERLEAF
+             x[1..72] <- ALIGN_SPRINZL(Candidate)     // unfilled positions = GAP
+             if alignment fails: reject
+             acceptor_arm   <- (1,72)(2,71)(3,70)(4,69)(5,68)(6,67)(7,66)
+             D_arm          <- (10,25)(11,24)(12,23)(13,22)
+             anticodon_arm  <- (27,43)(28,42)(29,41)(30,40)(31,39)
+             T_arm          <- (49,65)(50,64)(51,63)(52,62)(53,61)
+             STEM_SLOTS     <- all 42 positions in the four arms above
+             tertiary_pairs <- 8-14, 15-48, 18-55, 19-56, 26-44, 32-38, 54-58
+             // the mapping x is stored with the hit: every positional value
+             // downstream depends on it
+
+ STEP 7: TEST STEM PAIRING
+             a pair is formed if A-U, U-A, G-C, C-G, G-U or U-G
+             a pair with a GAP on either side is NOT SCORED (not a mismatch)
+             stem_deviation <- non-Watson-Crick pairs over the 21 stem pairs
+             if stem_deviation > 2: REJECT                             // R2 (as Methods 2.2.3)
+             P_pair <- formed pairs / scored pairs      // reported, not used to decide
+
+ STEP 8: TEST CONSERVED POSITIONS OF THE SEARCH DESCRIPTOR
+             DESCRIPTOR <- {8:U, 18:G, 19:R, 53:R, 55:Y, 58:A}   // R = A/G, Y = C/U
+             optional D-loop positions 17, 17a, 17b, 20a, 20b, 20c allowed;
+             variable arm allowed if < 21 nt
+             if descriptor not satisfied: REJECT
+
+ STEP 9: TEST TERTIARY INTERACTIONS
+             tertiary_deviation <- mismatches over tertiary_pairs
+             if tertiary_deviation > 1: REJECT                         // R2 (as Methods 2.2.3)
+
+ STEP 10: EXAMINE THE ANTICODON
+             anticodon <- x[34] x[35] x[36]
+             if anticodon not in {UCA, CUA, UUA}: REJECT
+             // a stop-codon-complementary anticodon is a SELECTION criterion only;
+             // it is not evidence of suppressor or selenocysteine function
+
+ STEP 11: EVALUATE THE BHB-ASSOCIATED SPLIT SITE
+             extract the genomic context flanking both halves
+             test for opposing bulges of >= 3 nt separated by a 4-bp central
+             helix at the 37/38 split region (bh_loop())
+             if bh_loop() does not exist: REJECT
+             S_split <- split-context score
+
+ STEP 12: OUTPUT OF STAGE I                                            // R2
+             emit (x, anticodon, coordinates of both halves, separation,
+                   P_pair, S_split)
+             if g is the real genome: add to CAND       // candidates
+             else:                    add to DECOY      // decoys
+   decoys_per_genome[run] <- number of decoys from each randomized genome  // R2
+   decoy_rate <- size(DECOY) / NR                                          // R2
+   decoy_rate_CI <- exact Poisson 95% CI of size(DECOY) / NR               // R2
+   dispersion_p  <- chi-square test that variance = mean over the NR counts // R2
+   pass CAND and DECOY to STAGE II and STAGE III
+
+
+===============================================================================
+STAGE II - PROBABILISTIC SCORE
+===============================================================================
+
+ STEP 13: INPUTS
+   REF    reference set, 199 known tRNAs (T-psi-C), duplicate records removed
+   VAL1   62 known tRNAs of M. barkeri str. Wiesmoor (GtRNAdb, tRNAscan-SE),
+          held out of REF; computational annotations, not experimentally
+          confirmed; tRNA of undetermined isotype excluded
+   VAL2   96 further T-psi-C tRNAs, held out of REF (no accession overlap)
+   POS    VAL1 + VAL2 (158 held-out known tRNAs)
+   CAND, DECOY from STAGE I
+   alpha <- 1                                              // Laplace smoothing
+
+ --- Build the reference model (REF only) -------------------------------------
+
+ STEP 14: READ THE REFERENCE SET BY POSITION LABEL
+   for each record r in REF, each position i in 1..72:
+       REF[r][i] <- normalise(cell)    // T->U; 'Absent', '-', blank -> GAP
+   assert the 72 columns are those LABELLED 1..72
+   // taking the first 72 data columns instead shifts every position from 18
+   // onward and silently drops 69-72
+   assert no position has N_i = 0
+
+ STEP 15: EMISSION PROBABILITIES
+   for i <- 1 to 72:
+       n_i(b) <- count of records with REF[r][i] = b, for b in {A,C,G,U}
+       N_i    <- n_i(A)+n_i(C)+n_i(G)+n_i(U)            // GAPs excluded
+       e_i(b) <- ( n_i(b) + alpha ) / ( N_i + 4*alpha )
+       assert sum over b of e_i(b) = 1
+
+ STEP 16: TRANSITION PROBABILITIES AND BACKGROUNDS
+   for i <- 1 to 71:
+       c_i(b1,b2) <- count with REF[r][i]=b1 and REF[r][i+1]=b2
+       Cx_i(b1)   <- sum over b2 of c_i(b1,b2)
+       t_i(b2|b1) <- ( c_i(b1,b2) + alpha ) / ( Cx_i(b1) + 4*alpha )
+       assert sum over b2 of t_i(b2|b1) = 1
+   q(b)       <- sum_i n_i(b) / sum_{i,b} n_i(b)
+   q_d(b2|b1) <- ( sum_i c_i(b1,b2) + alpha )
+                 / ( sum_{i,b2} c_i(b1,b2) + 4*alpha )
+
+ STEP 17: FUNCTION SCORE(x, leave_one_out = none)
+   E <- mean over { i : x[i] != GAP } of ln[ e_i(x[i]) / q(x[i]) ]
+   T <- mean over { i : x[i], x[i+1] != GAP } of
+                       ln[ t_i(x[i+1]|x[i]) / q_d(x[i+1]|x[i]) ]
+   S <- ( E + T ) / 2
+   return (E, T, S, n_E, n_T)
+   // gaps skipped; transitions spanning a gap DROPPED, not bridged
+   // means, not sums: otherwise a longer sequence scores higher for being longer
+
+ --- Score known tRNAs and the two negative controls --------------------------
+
+ STEP 18: SCORE THE REFERENCE SET, LEAVE ONE OUT
+   for each r in REF:
+       rebuild e_i, t_i with r's own counts subtracted
+       S_r <- SCORE(r, leave_one_out = r)
+
+ STEP 19: SCORE THE HELD-OUT KNOWN tRNAs
+   deduplicate VAL1, VAL2; assert neither overlaps REF
+   S_POS <- { SCORE(x) : x in POS }
+   min_known <- min of S_POS
+
+ STEP 20: NEGATIVE CONTROL 1 - BASE-SHUFFLED tRNAs                    // R2 (from VAL2)
+   SHUF <- empty
+   for each x in VAL2, repeat 10 times (fixed seed):
+       permute x's own bases across its own occupied positions // GAPs stay GAPs
+       SHUF <- SHUF + { SCORE(permuted x) }                    // 960 sequences
+   // same composition as the source, positional order destroyed
+
+ STEP 21: NEGATIVE CONTROL 2 - DECOYS
+   S_DECOY <- { SCORE(y) : y in DECOY }                         // from STAGE I
+   // same search, same filters, same anticodon classes as CAND
+   // the decoys are the realistic negative control
+
+ STEP 22: SCORE THE CANDIDATES
+   S_CAND <- { SCORE(x) : x in CAND }
+
+ --- Threshold and empirical p ------------------------------------------------
+
+ STEP 23: THRESHOLD CALIBRATION
+   AUC_known_vs_decoy <- Mann-Whitney AUC of S_POS against S_DECOY
+   AUC_known_vs_shuf  <- Mann-Whitney AUC of S_POS against SHUF
+   max_decoy <- max of S_DECOY
+   if max_decoy < min_known:                  // separation complete (AUC = 1)
+       tau <- ( max_decoy + min_known ) / 2   // midpoint: a stated choice,
+                                              // every cut in the band is equivalent
+   else:
+       tau <- threshold maximising Youden J
+   // tau is calibrated ON the decoys: "no decoy exceeds tau" is true by
+   // construction and is never reported as evidence                 // R2
+
+ STEP 24: EMPIRICAL p FOR A CANDIDATE
+   p(x) <- ( count{ s in S_DECOY : s >= S(x) } + 1 ) / ( size(DECOY) + 1 )
+   p_min <- 1 / ( size(DECOY) + 1 )
+   if p_min > 0.05:
+       WARN "no candidate can reach p < 0.05 with this number of decoys"
+       WARN "about 99 decoys (ceil(99 / decoy_rate) randomized genomes)
+             are needed for p < 0.01"
+
+ STEP 25: STAGE II ZONE OF EACH SEQUENCE (candidates and decoys)      // R2
+   if S(x) >= tau:          zone <- ABOVE THRESHOLD
+   else if S(x) > max_decoy: zone <- ABOVE EVERY DECOY
+   else:                    zone <- DECOY RANGE
+
+ STEP 26: STRUCTURAL MEASURES - REPORTED ONLY                          // R2
+   I     <- matches over {8:U, 14:A, 21:A, 33:U, 48:C, 53:G, 54:U, 55:U, 56:C,
+                          57:G, 58:A, 61:C} / positions present
+   Theta <- matches over T-loop {54:U, 55:U, 56:C, 57:G, 58:A} / positions present
+   I_5, Theta_5 <- 5th percentiles of I and Theta over POS
+   // P_pair, I and Theta are reported for every sequence but NOT used in the
+   // decision: the Stage I filters already remove sequences that cannot fold,
+   // and the decoys match these positions as often as the candidates
+
+ STEP 27: EFFECT OF GC ON THE SCORE                                    // R2
+   r_known <- Pearson r of S against GC over POS
+   compare S_POS with SHUF (identical composition, order destroyed)
+   POOL <- CAND + DECOY;  r_pool <- Pearson r of S against GC over POOL
+   fit S = a + b*GC over POOL;  resid <- S - (a + b*GC)
+   AUC_resid, p_resid <- Mann-Whitney of resid, CAND vs DECOY
+   // reading: if r_known ~ 0 and SHUF << POS, the score measures positional
+   // order, not composition; if p_resid is not significant, the score does
+   // not separate candidates from decoys beyond their GC difference
+
+
+===============================================================================
+STAGE III - GC CRITERIA
+===============================================================================
+
+ STEP 28: FUNCTION GC_PROFILE(x)
+   // one definition used everywhere: known tRNAs, candidates and decoys
+   PRESENT  <- { i in 1..72 : x[i] != GAP }
+   STEMS    <- { i in PRESENT : i in STEM_SLOTS }     // at most 42 positions
+   NONSTEM  <- PRESENT \ STEMS
+   GC         <- count{ i in PRESENT : x[i] in {G,C} } / size(PRESENT)
+   GC_stem_n  <- count{ i in STEMS   : x[i] in {G,C} }      // integer, of 42
+   GC_nonstem <- count{ i in NONSTEM : x[i] in {G,C} } / size(NONSTEM)
+   dGC        <- ( GC_stem_n / 42 - GC_nonstem ) * 100      // percentage points
+   return (GC, GC_stem_n, GC_nonstem, dGC)
+   // positive dGC = stems richer in G+C than the rest of the molecule;
+   // this is the informative direction and C3 is applied one-sided
+   // RATIONALE: G-C pairs form three hydrogen bonds against two for A-U, so
+   // stems that must pair stably are GC-enriched; loops are not
+   // positions are counted, not raw nucleotides: insertions (17a, 20a, e1 ...)
+   // are outside positions 1-72 and excluded
+
+ STEP 29: THRESHOLDS FROM THE REFERENCE tRNAs ONLY
+   for each r in REF: profile_r <- GC_PROFILE(r)
+   C1_thr <- 5th percentile of GC        over REF     // 49.2%
+   C2_thr <- 5th percentile of GC_stem_n over REF     // 24 of 42
+   C3_thr <- 5th percentile of dGC       over REF     // +14.9 points
+   // CAND and DECOY are never consulted here
+   // 5th percentile = one-sided 95% reference limit; non-parametric because
+   // the overall-GC distribution is left-skewed
+   report for REF, VAL1, VAL2, CAND, DECOY:                            // R2
+          n, mean, SD, median, 5th/25th/75th/95th percentiles, min, max of
+          GC, GC_stem_n and dGC; fraction with dGC > 0
+   // SANITY: if C3_thr <= 0 the stem position list is wrong
+
+ STEP 30: APPLY THE CRITERIA TO EVERY SEQUENCE
+   for x in CAND + DECOY (and REF, VAL1, VAL2 for the audit):
+       C1 <- GC >= C1_thr;  C2 <- GC_stem_n >= C2_thr;  C3 <- dGC >= C3_thr
+       n_GC <- C1 + C2 + C3                                    // 0..3
+   // applied regardless of the Stage II result
+   report pass rates of C1, C2, C3 and (C1 and C2 and C3) for every set
+   if pass rate (all three) over VAL1 or VAL2 < 0.90:
+       WARN "criteria too strict: they reject known tRNAs"
+   if any decoy meets all three:
+       report it; do not tune the thresholds
+
+ STEP 31: PERCENTILE SENSITIVITY                                       // R2
+   for q in {1, 2.5, 5, 10} percent:
+       recompute C1_thr, C2_thr, C3_thr at percentile q over REF
+       report REF, CAND and DECOY meeting all three
+
+ STEP 32: DISCRIMINATION OF CANDIDATES FROM DECOYS                     // R2
+   // two-sided Mann-Whitney U, normal approximation, tie and continuity
+   // correction; AUC = U / (size(CAND) * size(DECOY)); exact ties counted
+   z-standardise S, GC, GC_stem_n, dGC over POOL
+   for F in { S,  GC,  GC_stem,  dGC,  GC + GC_stem + dGC }:
+       report AUC(F), p(F)                                 // features WITHOUT S
+       report AUC(F + S), p(F + S), change = AUC(F + S) - AUC(F)   // WITH S
+   // reading: if adding S lowers the AUC of every GC feature, S adds no
+   // discrimination between candidates and decoys beyond GC; S is then kept
+   // only as a necessary condition (tRNA-like positional pattern), not as a
+   // discriminator
+   // all values are obtained on the same POOL with limited power; report them
+   // as discrimination between these sets, not as biological validation
+
+
+===============================================================================
+FINAL DECISION RULE AND REPORTING
+===============================================================================
+
+ STEP 33: CLASSIFICATION (rule fixed before it is applied)             // R2
+   for each x in CAND (and each y in DECOY, for the stage table):
+       if zone(x) = ABOVE THRESHOLD and n_GC(x) = 3:
+           STATUS <- SUPPORTED          // putative split tRNA (computational)
+       else if zone(x) in {ABOVE THRESHOLD, ABOVE EVERY DECOY}:
+           STATUS <- BORDERLINE         // not rejected, not supported
+       else:
+           STATUS <- NOT SUPPORTED      // score within the decoy range
+   // GC is an ADDITIONAL requirement, never a rescue: a sequence in the decoy
+   // range stays NOT SUPPORTED whatever its GC profile
+   // P_pair, I and Theta are not used (STEP 26)
+   if STATUS = NOT SUPPORTED and n_GC >= 2:
+       FLAG "partial GC evidence but decoy-like score"
+   if p_min > 0.05:
+       FLAG "p at resolution floor"
+
+ STEP 34: RULE SENSITIVITY                                             // R2
+   for RULE in { S >= tau only,
+                 S > max_decoy only,
+                 all three GC criteria only,
+                 at least two GC criteria only,
+                 final rule (STEP 33) }:
+       report candidates and decoys selected
+   // the supported result is robust if the same candidate is selected by
+   // every rule and no decoy by any
+
+ STEP 35: STAGE TABLE FOR CANDIDATES AND DECOYS                        // R2
+   report, for CAND and DECOY separately:
+       Stage I    number of structural-search hits; decoy_rate with 95% CI
+       Stage II   number in each zone (ABOVE THRESHOLD / ABOVE EVERY DECOY /
+                  DECOY RANGE); note that decoy zones are fixed by construction
+       Stage III  number meeting all three / one or two / no GC criteria
+       Final      SUPPORTED / BORDERLINE / NOT SUPPORTED
+   decoys retained per randomized genome after Stage III:
+       size({ y in DECOY : n_GC(y) = 3 }) / NR, with upper 95% bound if zero
+
+ STEP 36: ANTICODON CLASS AND ARRANGEMENT                              // R2
+   anticodon class <- Sec-class if UCA; Sup-class if CUA or UUA
+   // a label for the anticodon only, NOT a demonstrated function
+   if both halves on the same strand and separated by a short region at the
+      37/38 position:
+       arrangement <- "intron-like (halves adjacent at the canonical intron site)"
+   else:
+       arrangement <- "split (halves at distant loci)"
+
+ STEP 37: COMPARISON WITH CONVENTIONAL ANNOTATION                      // R2
+   ANNOT <- tRNA annotation of the genome in GtRNAdb (tRNAscan-SE; record
+            release and access date)
+   detected(x) <- ANNOT contains a tRNA gene with the anticodon of x
+   report detection for every candidate
+   // tRNAscan-SE searches contiguous regions and is not designed to detect
+   // tRNAs whose halves lie at separate loci: report the comparison as a
+   // limitation of contiguous-search annotation, not as a performance test
+
+ STEP 38: OUTPUT RECORD
+       candidate id, strand, coordinates of both halves, genomic separation,
+       arrangement, mature sequence, Sprinzl mapping, anticodon and class,
+       E, T, S with n_E and n_T, p, zone, tau, max_decoy, min_known,
+       P_pair, I, Theta, S_split,
+       GC, GC_stem_n, GC_nonstem, dGC, C1, C2, C3, n_GC,
+       C1_thr, C2_thr, C3_thr (from REF),
+       STATUS and any FLAGs
+
+ STEP 39: STATE EXPLICITLY IN THE REPORT                               // R2
+       - C1_thr, C2_thr, C3_thr were derived from REF alone;
+       - VAL1 consists of computational annotations, not confirmed tRNAs;
+       - the resolution floor p_min of the decoy comparison;
+       - the randomized genomes preserve base composition only (not
+         dinucleotides, local GC variation or repeats); decoys are AT-rich;
+       - every classification is computational: transcription, processing of
+         the two halves, aminoacylation and stop-codon suppression require
+         experimental validation.
+
+ NOT PERFORMED IN THIS STUDY (proposed future work)                    // R2
+       - GC-matched decoys (decoys or genomic windows matched to each
+         candidate's GC) and scoring against them
+       - a larger number of randomized genomes (about 380 for p < 0.01)
+       - applying C1-C3 inside Stage I and re-running the genome search
+END
+===============================================================================
